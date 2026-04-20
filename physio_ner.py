@@ -131,6 +131,16 @@ PHYSIO_KEYWORDS = [
     "PHYSIOTHERAPY FOR NECK",
 ]
 
+# Medical exclusion terms — these indicate NON-physio medical activities
+# If found in the same segment, invalidate the physio match
+MEDICAL_EXCLUSIONS = [
+    "tooth extraction", "dental extraction", "extraction of tooth",
+    "meet nephrologist", "meet cardiologist", "meet neurologist",
+    "meet endocrinologist", "meet surgeon", "meet dentist", "meet dental",
+    "opd with", "opd after", "review with dr", "follow up with dr",
+    "consultation with", "consult with", "appointment with",
+]
+
 # Fuzzy matching threshold — tune this to reduce false positives
 # 85 = fairly strict, 75 = more lenient (catches more typos)
 FUZZY_THRESHOLD = 82
@@ -235,7 +245,10 @@ def fuzzy_match_segment(segment: str) -> list[dict]:
     for window in range(1, 7):
         for i in range(len(tokens) - window + 1):
             chunk = " ".join(tokens[i : i + window])
-            if len(chunk) < 3:   # skip very short chunks
+            
+            # Skip very short chunks OR single-word chunks under 5 chars
+            # This prevents "TRACTION" matching "extraction" partially
+            if len(chunk) < 3 or (window == 1 and len(chunk) < 5):
                 continue
 
             best = process.extractOne(
@@ -247,6 +260,12 @@ def fuzzy_match_segment(segment: str) -> list[dict]:
 
             if best:
                 kw, score, _ = best
+                
+                # Additional validation: if match is single-word and significantly shorter
+                # than keyword, it's likely a partial match — skip it
+                if window == 1 and len(chunk) < len(kw) * 0.7:
+                    continue
+                    
                 if kw not in seen:
                     seen.add(kw)
                     conf = (
@@ -281,12 +300,22 @@ STRONG_TERMS = {
     "POSTURAL DRAINAGE", "INCENTIVE SPIROMETRY",
 }
 
-def is_valid_physio_hit(matched_kw: str, all_matches: list[dict]) -> bool:
+def is_valid_physio_hit(matched_kw: str, all_matches: list[dict], segment_text: str = "") -> bool:
     """
     If a match is a weak term, require at least one other physio match nearby.
     Strong terms are always valid.
+    Also check for medical exclusion terms in the segment.
     """
     kw = matched_kw.upper()
+    
+    # Check for medical exclusion patterns in the segment
+    if segment_text:
+        seg_lower = segment_text.lower()
+        for exclusion in MEDICAL_EXCLUSIONS:
+            if exclusion in seg_lower:
+                # This segment is about a medical appointment/procedure, not physio
+                return False
+    
     if kw in STRONG_TERMS:
         return True
     if kw in WEAK_TERMS:
@@ -327,13 +356,18 @@ def extract_physio_leads(raw_text: str) -> dict:
     # ── Step A: Exact matching on full text ──
     exact_hits = exact_match(clean)
 
-    # ── Step B: Fuzzy matching per segment ──
-    segments   = tokenize_segments(raw_text)  # use original for segments
-    fuzzy_hits = []
+    # ── Step B: Fuzzy matching per segment + store segment map for validation ──
+    segments      = tokenize_segments(raw_text)  # use original for segments
+    fuzzy_hits    = []
+    hit_to_seg    = {}  # track which segment each hit came from
+    
     for seg in segments:
         seg_clean = preprocess(seg)
         if seg_clean:
-            fuzzy_hits.extend(fuzzy_match_segment(seg_clean))
+            seg_hits = fuzzy_match_segment(seg_clean)
+            for hit in seg_hits:
+                hit_to_seg[hit.get("keyword", hit["matched_text"])] = seg_clean
+            fuzzy_hits.extend(seg_hits)
 
     # ── Step C: Merge, deduplicate ──
     all_hits = exact_hits + fuzzy_hits
@@ -348,10 +382,13 @@ def extract_physio_leads(raw_text: str) -> dict:
     deduped = list(seen_kw.values())
 
     # ── Step D: Context validation ──
-    valid_hits = [
-        h for h in deduped
-        if is_valid_physio_hit(h.get("keyword", h["matched_text"]), deduped)
-    ]
+    valid_hits = []
+    for h in deduped:
+        kw = h.get("keyword", h["matched_text"])
+        # Get the segment this keyword was found in (if from fuzzy matching)
+        segment_text = hit_to_seg.get(kw, clean)
+        if is_valid_physio_hit(kw, deduped, segment_text):
+            valid_hits.append(h)
 
     if not valid_hits:
         return {
