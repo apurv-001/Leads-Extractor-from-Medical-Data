@@ -190,9 +190,6 @@ def render_summary_stats(results_list):
     total  = len(results_list)
     physio = sum(1 for _, _, r in results_list if r["label"] == "Physiotherapy")
     none   = total - physio
-    all_cats = [l["category"] if isinstance(l, dict) and "category" in l
-                else kw
-                for _, _, r in results_list for kw in r["keywords"]]
 
     s1, s2, s3 = st.columns(3)
     for col, num, lbl in [(s1, total, "Total Records"),
